@@ -1,0 +1,39 @@
+{
+  "telegram_token": "",
+  "llm_url": "http://172.30.1.93:8000",
+  "llm_chat_path": "/v1/chat/completions",
+  "llm_model": "gpt-oss-120b",
+  "llm_temperature": 0.4,
+  "llm_max_tokens": 800,
+  "system_prompt": "You are a concise, capable assistant for Telegram. Provide direct, helpful answers.",
+  "memory_turns": 10,
+  "memory_file": "/home/parkts/telegram_agent/memory.json",
+  "poll_timeout": 25,
+  "bot_mode": "polling",
+  "webhook_host": "0.0.0.0",
+  "webhook_port": 8080,
+  "webhook_path": "/webhook",
+  "webhook_url": "",
+  "agent_mode": "news_rag",
+  "search_min_docs": 4,
+  "search_min_coverage": 0.8,
+  "search_max_rounds": 3,
+  "search_providers": [
+    {
+      "type": "google_cse",
+      "api_key": "",
+      "cx": "",
+      "per_query": 5,
+      "site_filters_mode": "or",
+      "site_filters": [
+        "finance.yahoo.com",
+        "dcinside.com",
+        "reddit.com"
+      ]
+    },
+    {
+      "type": "reddit_json",
+      "per_query": 5
+    }
+  ]
+}
