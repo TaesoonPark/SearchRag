@@ -24,6 +24,7 @@ class Config:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    llm_timeout: int
 
     searxng_base_url: str
     searxng_engines: List[str]
@@ -39,6 +40,7 @@ class Config:
     max_doc_chars: int
 
     fetch_timeout: int
+    graph_timeout: int
     max_fetch_concurrency: int
     log_level: str
 
@@ -80,10 +82,11 @@ def load_config() -> Config:
         return result
 
     cfg = Config(
-        llm_base_url=_get("LLM_BASE_URL", "http://localhost:8000/v1"),
+        llm_base_url=_get("LLM_BASE_URL", "http://localhost:8010/v1"),
         llm_api_key=_get("LLM_API_KEY", "local-token"),
-        llm_model=_get("LLM_MODEL", "gpt-oss-120b"),
-        searxng_base_url=_get("SEARXNG_BASE_URL", "http://localhost:8080"),
+        llm_model=_get("LLM_MODEL", "openai/gpt-oss-120b"),
+        llm_timeout=_get_int("LLM_TIMEOUT", 120),
+        searxng_base_url=_get("SEARXNG_BASE_URL", "http://localhost:8001"),
         searxng_engines=_get_list("SEARXNG_ENGINES"),
         telegram_bot_token=_get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_ids=_get_int_list("TELEGRAM_ALLOWED_CHAT_IDS"),
@@ -94,6 +97,7 @@ def load_config() -> Config:
         max_docs_to_fetch=_get_int("MAX_DOCS_TO_FETCH", 12),
         max_doc_chars=_get_int("MAX_DOC_CHARS", 2000),
         fetch_timeout=_get_int("FETCH_TIMEOUT", 12),
+        graph_timeout=_get_int("GRAPH_TIMEOUT", 240),
         max_fetch_concurrency=_get_int("MAX_FETCH_CONCURRENCY", 6),
         log_level=_get("LOG_LEVEL", "INFO"),
     )

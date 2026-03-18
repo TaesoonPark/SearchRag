@@ -11,4 +11,5 @@ def build_llm(cfg: Config, temperature: float = 0.2) -> ChatOpenAI:
         api_key=cfg.llm_api_key,
         model=cfg.llm_model,
         temperature=temperature,
+        timeout=cfg.llm_timeout,
     )

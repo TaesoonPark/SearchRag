@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, TypedDict
 
 import httpx
@@ -17,6 +19,7 @@ from normalize import dedupe_preserve, trim_text
 from search import collect_documents, searxng_search
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+logger = logging.getLogger(__name__)
 
 
 class SearchPlan(BaseModel):
@@ -79,11 +82,13 @@ def _result_summary(result: SearchResult) -> dict:
 
 
 async def search_agent(state: GraphState, cfg: Config) -> GraphState:
+    started_at = perf_counter()
     llm = build_llm(cfg, temperature=0.2)
     system_prompt = load_prompt("search_agent_system.txt")
 
     query = state["query"]
     previous_gaps = "\n".join(state.get("next_queries", []))
+    logger.info("search_agent started: query=%r attempt=%s", query, state.get("attempts", 0) + 1)
 
     user_prompt = (
         f"키워드: {query}\n"
@@ -121,6 +126,7 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             queries.append(f"{query} site:{site}")
 
     queries = dedupe_preserve(queries)
+    logger.info("search_agent query plan ready: query_count=%s", len(queries))
 
     timeout = cfg.fetch_timeout
 
@@ -136,7 +142,6 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     for batch in searx_results_lists:
         search_results.extend(batch)
 
-    # Deduplicate by URL
     seen_urls = set()
     deduped: List[SearchResult] = []
     for result in search_results:
@@ -154,6 +159,17 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     )
 
     attempts = state.get("attempts", 0) + 1
+    elapsed = perf_counter() - started_at
+    logger.info(
+        "search_agent finished: query=%r attempt=%s queries=%s raw_results=%s deduped_results=%s documents=%s elapsed=%.2fs",
+        query,
+        attempts,
+        len(queries),
+        len(search_results),
+        len(deduped),
+        len(documents),
+        elapsed,
+    )
 
     return {
         "related_queries": queries,
@@ -165,11 +181,13 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
 
 
 async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
+    started_at = perf_counter()
     llm = build_llm(cfg, temperature=0.1)
     system_prompt = load_prompt("verify_agent_system.txt")
 
     documents = state.get("documents", [])
     doc_count = len(documents)
+    logger.info("verify_agent started: query=%r doc_count=%s", state.get("query"), doc_count)
 
     now = datetime.utcnow()
     recent_cutoff = now - timedelta(days=cfg.max_age_days)
@@ -224,6 +242,15 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
     notes = verdict.notes
     if not heuristics_ok:
         notes = f"Heuristic 부족: doc_count={doc_count}, recent_docs={recent_docs}. {notes}"
+    elapsed = perf_counter() - started_at
+    logger.info(
+        "verify_agent finished: query=%r sufficient=%s recent_docs=%s docs_with_date=%s elapsed=%.2fs",
+        state.get("query"),
+        is_sufficient,
+        recent_docs,
+        docs_with_date,
+        elapsed,
+    )
 
     return {
         "is_sufficient": is_sufficient,
@@ -233,10 +260,12 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
 
 
 async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
+    started_at = perf_counter()
     llm = build_llm(cfg, temperature=0.2)
     system_prompt = load_prompt("writer_agent_system.txt")
 
     docs = state.get("documents", [])
+    logger.info("writer_agent started: query=%r doc_count=%s", state.get("query"), len(docs))
     payload = {
         "query": state.get("query"),
         "documents": docs,
@@ -247,6 +276,13 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
             ("system", system_prompt),
             ("user", json.dumps(payload, ensure_ascii=False)),
         ]
+    )
+    elapsed = perf_counter() - started_at
+    logger.info(
+        "writer_agent finished: query=%r response_chars=%s elapsed=%.2fs",
+        state.get("query"),
+        len(response.content.strip()),
+        elapsed,
     )
 
     return {

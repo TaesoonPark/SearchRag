@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from config import load_config
@@ -29,7 +30,7 @@ def main() -> None:
             "attempts": 0,
             "next_queries": [],
         }
-        result = await graph.ainvoke(state)
+        result = await asyncio.wait_for(graph.ainvoke(state), timeout=cfg.graph_timeout)
         return result.get("response", "")
 
     app = build_telegram_app(cfg, run_graph)
