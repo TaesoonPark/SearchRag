@@ -4,7 +4,8 @@
 
 ## 구성
 - LangGraph 기반 다중 에이전트 3단계 파이프라인
-- SearXNG + Brave Search API로 검색
+- SearXNG로 검색
+- 기존 Brave 검색 구현은 `brave_search.py`로 분리
 - BeautifulSoup 기반 HTML 정규화/요약
 - Telegram Bot으로 대화
 
@@ -24,7 +25,6 @@ cp .env.example .env
 - `LLM_MODEL` (예: gpt-oss-120b)
 - `TELEGRAM_BOT_TOKEN`
 - `SEARXNG_BASE_URL`
-- `BRAVE_SEARCH_API_KEY` (선택)
 
 SearXNG 엔진은 인스턴스에서 활성화된 엔진 이름과 일치해야 합니다.
 

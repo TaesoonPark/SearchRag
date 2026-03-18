@@ -14,7 +14,7 @@ from config import Config
 from llm import build_llm
 from models import Document, SearchResult
 from normalize import dedupe_preserve, trim_text
-from search import brave_search, collect_documents, searxng_search
+from search import collect_documents, searxng_search
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -129,18 +129,11 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             searxng_search(client, cfg.searxng_base_url, q, cfg.searxng_engines, timeout)
             for q in queries
         ]
-        brave_tasks = [
-            brave_search(client, q, cfg.brave_search_api_key, cfg.brave_search_country, cfg.brave_search_lang, timeout)
-            for q in queries
-        ]
 
         searx_results_lists = await asyncio.gather(*searx_tasks) if searx_tasks else []
-        brave_results_lists = await asyncio.gather(*brave_tasks) if brave_tasks else []
 
     search_results: List[SearchResult] = []
     for batch in searx_results_lists:
-        search_results.extend(batch)
-    for batch in brave_results_lists:
         search_results.extend(batch)
 
     # Deduplicate by URL

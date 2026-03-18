@@ -28,10 +28,6 @@ class Config:
     searxng_base_url: str
     searxng_engines: List[str]
 
-    brave_search_api_key: str
-    brave_search_country: str
-    brave_search_lang: str
-
     telegram_bot_token: str
     telegram_allowed_chat_ids: List[int]
 
@@ -89,9 +85,6 @@ def load_config() -> Config:
         llm_model=_get("LLM_MODEL", "gpt-oss-120b"),
         searxng_base_url=_get("SEARXNG_BASE_URL", "http://localhost:8080"),
         searxng_engines=_get_list("SEARXNG_ENGINES"),
-        brave_search_api_key=_get("BRAVE_SEARCH_API_KEY", ""),
-        brave_search_country=_get("BRAVE_SEARCH_COUNTRY", "US"),
-        brave_search_lang=_get("BRAVE_SEARCH_LANG", "en"),
         telegram_bot_token=_get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_ids=_get_int_list("TELEGRAM_ALLOWED_CHAT_IDS"),
         max_search_attempts=_get_int("MAX_SEARCH_ATTEMPTS", 2),
