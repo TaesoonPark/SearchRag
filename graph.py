@@ -119,19 +119,22 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
 
     raw_query = state.get("raw_query") or state["query"]
     query = _normalize_search_query(raw_query)
-    previous_gaps = "\n".join(state.get("next_queries", []))
+    retry_queries = state.get("next_queries", [])
+    previous_queries = state.get("related_queries", [])
     logger.info("search_agent started: query=%r attempt=%s", query, state.get("attempts", 0) + 1)
 
-    user_prompt = (
-        f"키워드: {query}\n"
-        f"부족한 부분/재검색 요청: {previous_gaps}\n"
-        "JSON 스키마를 따르세요."
-    )
+    prompt_payload = {
+        "original_query": raw_query,
+        "normalized_query": query,
+        "attempt": state.get("attempts", 0) + 1,
+        "previous_queries": previous_queries[-12:],
+        "retry_queries": retry_queries[:6],
+    }
 
     response = await llm.ainvoke(
         [
             ("system", system_prompt),
-            ("user", user_prompt),
+            ("user", json.dumps(prompt_payload, ensure_ascii=False)),
         ]
     )
 
@@ -149,9 +152,6 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             ],
             notes="fallback plan",
         )
-
-    retry_queries = state.get("next_queries", [])
-    previous_queries = state.get("related_queries", [])
 
     queries = [query] + retry_queries + plan.queries
     queries = dedupe_preserve(queries)
@@ -260,19 +260,23 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
             recent_docs += 1
 
     summary = {
+        "original_query": state.get("raw_query") or state.get("query"),
+        "active_query": state.get("query"),
+        "related_queries": state.get("related_queries", [])[-12:],
         "doc_count": doc_count,
         "recent_docs": recent_docs,
         "docs_with_date": docs_with_date,
         "max_age_days": cfg.max_age_days,
         "min_docs": cfg.min_docs,
         "min_recent_docs": cfg.min_recent_docs,
-        "sample_titles": [doc.get("title", "") for doc in documents[:5]],
+        "search_results_sample": state.get("search_results", [])[:8],
+        "documents_sample": documents[:6],
     }
 
     response = await llm.ainvoke(
         [
             ("system", system_prompt),
-            ("user", f"검증 요약: {json.dumps(summary, ensure_ascii=False)}"),
+            ("user", json.dumps(summary, ensure_ascii=False)),
         ]
     )
 
@@ -343,7 +347,10 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
     docs = state.get("documents", [])
     logger.info("writer_agent started: query=%r doc_count=%s", state.get("query"), len(docs))
     payload = {
-        "query": state.get("query"),
+        "original_query": state.get("raw_query") or state.get("query"),
+        "active_query": state.get("query"),
+        "verification_notes": state.get("verification_notes", ""),
+        "search_results_sample": state.get("search_results", [])[:8],
         "documents": docs,
     }
 
