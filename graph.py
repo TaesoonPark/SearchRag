@@ -40,6 +40,7 @@ class GraphState(TypedDict, total=False):
     raw_query: str
     query: str
     related_queries: List[str]
+    seen_urls: List[str]
     search_results: List[Dict[str, Any]]
     documents: List[Dict[str, Any]]
     attempts: int
@@ -83,6 +84,20 @@ def _result_summary(result: SearchResult) -> dict:
         "engine": result.engine,
         "published": result.published.isoformat() if result.published else "",
     }
+
+
+def _merge_items_by_url(existing: List[Dict[str, Any]], new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in existing + new_items:
+        url = str(item.get("url", "")).strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        merged.append(item)
+
+    return merged
 
 
 def _is_search_request(text: str) -> bool:
@@ -135,7 +150,10 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             notes="fallback plan",
         )
 
-    queries = [query] + plan.queries
+    retry_queries = state.get("next_queries", [])
+    previous_queries = state.get("related_queries", [])
+
+    queries = [query] + retry_queries + plan.queries
     queries = dedupe_preserve(queries)
 
     for site in plan.must_include_sites:
@@ -143,14 +161,24 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             queries.append(f"{query} site:{site}")
 
     queries = dedupe_preserve(queries)
-    logger.info("search_agent query plan ready: query_count=%s", len(queries))
+    previous_query_set = {item.strip() for item in previous_queries if item.strip()}
+    fresh_queries = [item for item in queries if item.strip() and item.strip() not in previous_query_set]
+    if not fresh_queries:
+        fresh_queries = queries
+
+    logger.info(
+        "search_agent query plan ready: query_count=%s fresh_query_count=%s prior_query_count=%s",
+        len(queries),
+        len(fresh_queries),
+        len(previous_query_set),
+    )
 
     timeout = cfg.fetch_timeout
 
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
         searx_tasks = [
             searxng_search(client, cfg.searxng_base_url, q, cfg.searxng_engines, timeout)
-            for q in queries
+            for q in fresh_queries
         ]
 
         searx_results_lists = await asyncio.gather(*searx_tasks) if searx_tasks else []
@@ -159,12 +187,13 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     for batch in searx_results_lists:
         search_results.extend(batch)
 
-    seen_urls = set()
+    prior_seen_urls = {item.strip() for item in state.get("seen_urls", []) if item.strip()}
+    batch_seen_urls = set()
     deduped: List[SearchResult] = []
     for result in search_results:
-        if not result.url or result.url in seen_urls:
+        if not result.url or result.url in prior_seen_urls or result.url in batch_seen_urls:
             continue
-        seen_urls.add(result.url)
+        batch_seen_urls.add(result.url)
         deduped.append(result)
 
     documents = await collect_documents(
@@ -176,23 +205,29 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     )
 
     attempts = state.get("attempts", 0) + 1
+    merged_search_results = _merge_items_by_url(state.get("search_results", []), [_result_summary(r) for r in deduped])
+    merged_documents = _merge_items_by_url(state.get("documents", []), [_doc_summary(d, cfg.max_doc_chars) for d in documents])
+    seen_urls_all = dedupe_preserve([*state.get("seen_urls", []), *[r.url for r in deduped if r.url]])
     elapsed = perf_counter() - started_at
     logger.info(
-        "search_agent finished: query=%r attempt=%s queries=%s raw_results=%s deduped_results=%s documents=%s elapsed=%.2fs",
+        "search_agent finished: query=%r attempt=%s fresh_queries=%s raw_results=%s new_results=%s total_results=%s new_documents=%s total_documents=%s elapsed=%.2fs",
         query,
         attempts,
-        len(queries),
+        len(fresh_queries),
         len(search_results),
         len(deduped),
+        len(merged_search_results),
         len(documents),
+        len(merged_documents),
         elapsed,
     )
 
     return {
         "query": query,
-        "related_queries": queries,
-        "search_results": [_result_summary(r) for r in deduped],
-        "documents": [_doc_summary(d, cfg.max_doc_chars) for d in documents],
+        "related_queries": dedupe_preserve([*previous_queries, *queries]),
+        "seen_urls": seen_urls_all,
+        "search_results": merged_search_results,
+        "documents": merged_documents,
         "attempts": attempts,
         "next_queries": [],
     }
