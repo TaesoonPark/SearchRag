@@ -11,6 +11,7 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_MESSAGE_LEN = 3500
+SEARCH_PREFIX = "검색 "
 
 
 def _chunk_text(text: str, max_len: int = MAX_TELEGRAM_MESSAGE_LEN) -> list[str]:
@@ -42,7 +43,7 @@ def build_telegram_app(cfg: Config, graph_runner: Callable[[str], str]):
             return
         if not _is_allowed(cfg, update.effective_chat.id):
             return
-        await update.message.reply_text("키워드를 보내면 최신 요약을 제공합니다.")
+        await update.message.reply_text('`검색 `으로 시작하면 검색 요약, 그 외에는 일반 대화로 응답합니다.')
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_chat is None or update.message is None:
@@ -54,7 +55,8 @@ def build_telegram_app(cfg: Config, graph_runner: Callable[[str], str]):
         if not text:
             return
 
-        await update.message.reply_text("검색 중... 잠시만 기다려주세요.")
+        waiting_message = "검색 중... 잠시만 기다려주세요." if text.startswith(SEARCH_PREFIX) else "생각 중... 잠시만 기다려주세요."
+        await update.message.reply_text(waiting_message)
 
         try:
             response = await graph_runner(text)

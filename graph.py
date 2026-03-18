@@ -37,6 +37,7 @@ class VerifyResult(BaseModel):
 
 
 class GraphState(TypedDict, total=False):
+    raw_query: str
     query: str
     related_queries: List[str]
     search_results: List[Dict[str, Any]]
@@ -46,6 +47,9 @@ class GraphState(TypedDict, total=False):
     verification_notes: str
     next_queries: List[str]
     response: str
+
+
+SEARCH_PREFIX = "검색 "
 
 
 def load_prompt(name: str) -> str:
@@ -81,12 +85,25 @@ def _result_summary(result: SearchResult) -> dict:
     }
 
 
+def _is_search_request(text: str) -> bool:
+    return text.startswith(SEARCH_PREFIX)
+
+
+def _normalize_search_query(text: str) -> str:
+    if _is_search_request(text):
+        stripped = text[len(SEARCH_PREFIX) :].strip()
+        if stripped:
+            return stripped
+    return text.strip()
+
+
 async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     started_at = perf_counter()
     llm = build_llm(cfg, temperature=0.2)
     system_prompt = load_prompt("search_agent_system.txt")
 
-    query = state["query"]
+    raw_query = state.get("raw_query") or state["query"]
+    query = _normalize_search_query(raw_query)
     previous_gaps = "\n".join(state.get("next_queries", []))
     logger.info("search_agent started: query=%r attempt=%s", query, state.get("attempts", 0) + 1)
 
@@ -172,6 +189,7 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     )
 
     return {
+        "query": query,
         "related_queries": queries,
         "search_results": [_result_summary(r) for r in deduped],
         "documents": [_doc_summary(d, cfg.max_doc_chars) for d in documents],
@@ -259,6 +277,29 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
     }
 
 
+async def direct_chat_agent(state: GraphState, cfg: Config) -> GraphState:
+    started_at = perf_counter()
+    llm = build_llm(cfg, temperature=0.6)
+    query = state.get("raw_query") or state["query"]
+    logger.info("direct_chat_agent started: query=%r", query)
+
+    response = await llm.ainvoke([("user", query)])
+    content = response.content.strip()
+
+    elapsed = perf_counter() - started_at
+    logger.info(
+        "direct_chat_agent finished: query=%r response_chars=%s elapsed=%.2fs",
+        query,
+        len(content),
+        elapsed,
+    )
+
+    return {
+        "query": query,
+        "response": content,
+    }
+
+
 async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
     started_at = perf_counter()
     llm = build_llm(cfg, temperature=0.2)
@@ -299,15 +340,26 @@ def build_graph(cfg: Config):
     async def _verify(state: GraphState) -> GraphState:
         return await verify_agent(state, cfg)
 
+    async def _direct_chat(state: GraphState) -> GraphState:
+        return await direct_chat_agent(state, cfg)
+
     async def _writer(state: GraphState) -> GraphState:
         return await writer_agent(state, cfg)
 
     graph.add_node("search_agent", _search)
     graph.add_node("verify_agent", _verify)
+    graph.add_node("direct_chat_agent", _direct_chat)
     graph.add_node("writer_agent", _writer)
 
-    graph.add_edge(START, "search_agent")
+    def _route_start(state: GraphState) -> str:
+        query = state.get("raw_query") or state.get("query", "")
+        if _is_search_request(query):
+            return "search_agent"
+        return "direct_chat_agent"
+
+    graph.add_conditional_edges(START, _route_start)
     graph.add_edge("search_agent", "verify_agent")
+    graph.add_edge("direct_chat_agent", END)
 
     def _route(state: GraphState) -> str:
         if state.get("is_sufficient"):

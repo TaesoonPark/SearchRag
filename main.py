@@ -26,6 +26,7 @@ def main() -> None:
 
     async def run_graph(query: str) -> str:
         state = {
+            "raw_query": query,
             "query": query,
             "attempts": 0,
             "next_queries": [],
