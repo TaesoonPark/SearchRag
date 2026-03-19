@@ -7,20 +7,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import load_config
+from config import Config, load_config
 from graph import build_graph
 from telegram_bot import build_telegram_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOG_PATH = PROJECT_ROOT / "bot_log"
 BACKGROUND_ENV = "SEARCHRAG_BACKGROUND_CHILD"
+LOGGER = logging.getLogger(__name__)
 
 
 def setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8")],
+        handlers=[logging.StreamHandler(), logging.FileHandler(LOG_PATH, encoding="utf-8")],
         force=True,
     )
 
@@ -41,15 +42,22 @@ def main() -> None:
             "attempts": 0,
             "next_queries": [],
         }
-        result = await asyncio.wait_for(graph.ainvoke(state), timeout=cfg.graph_timeout)
-        return result.get("response", "")
+        try:
+            if cfg.graph_timeout > 0:
+                result = await asyncio.wait_for(graph.ainvoke(state), timeout=cfg.graph_timeout)
+            else:
+                result = await graph.ainvoke(state)
+            return result.get("response", "")
+        except asyncio.TimeoutError:
+            LOGGER.warning("Graph execution timeout (query=%r, graph_timeout=%s)", query, cfg.graph_timeout)
+            return "요약 생성이 너무 오래 걸립니다. 잠시 후 다시 시도해주세요."
 
     app = build_telegram_app(cfg, run_graph)
     app.run_polling()
 
 
-def launch_background() -> bool:
-    if os.environ.get(BACKGROUND_ENV) == "1":
+def launch_background(cfg: Config) -> bool:
+    if not cfg.run_background or os.environ.get(BACKGROUND_ENV) == "1":
         return False
 
     with LOG_PATH.open("a", encoding="utf-8") as log_file:
@@ -70,5 +78,6 @@ def launch_background() -> bool:
 
 
 if __name__ == "__main__":
-    if not launch_background():
+    cfg = load_config()
+    if not launch_background(cfg):
         main()

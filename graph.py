@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, TypedDict
+from typing import Any, Dict, List, TypedDict, Optional
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +17,7 @@ from config import Config
 from llm import build_llm
 from models import Document, SearchResult
 from normalize import dedupe_preserve, trim_text
-from search import collect_documents, searxng_search
+from search import collect_documents, naver_search, searxng_search
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ class GraphState(TypedDict, total=False):
 
 
 SEARCH_PREFIX = "검색 "
+
+
+async def _invoke_with_timeout(llm, messages: list[tuple[str, str]], timeout: int):
+    return await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout)
 
 
 def load_prompt(name: str) -> str:
@@ -100,6 +105,104 @@ def _merge_items_by_url(existing: List[Dict[str, Any]], new_items: List[Dict[str
     return merged
 
 
+def _serialize_for_log(value: Any, max_len: int = 120) -> str:
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "..."
+
+
+def _serialize_query_list(values: Any, max_items: int = 8, item_len: int = 100) -> str:
+    if not isinstance(values, (list, tuple)):
+        return _serialize_for_log(values)
+    normalized: list[str] = []
+    for v in values:
+        item = str(v).strip()
+        if not item:
+            continue
+        normalized.append(_serialize_for_log(item, item_len))
+        if len(normalized) >= max_items:
+            break
+    if not normalized:
+        return "[]"
+    if len(values) > max_items:
+        return f"[{', '.join(normalized)}, ...(+{len(values)-len(normalized)}개)]"
+    return f"[{', '.join(normalized)}]"
+
+
+def _normalize_query(query: str) -> str:
+    normalized = re.sub(r"\s+", " ", query.strip().lower())
+    return re.sub(r"[^0-9a-z가-힣\s]", "", normalized)
+
+
+def _is_similar_query(query: str, candidates: set[str]) -> bool:
+    current = _normalize_query(query)
+    if not current:
+        return True
+    current_tokens = set(current.split())
+    if not current_tokens:
+        return True
+
+    for raw in candidates:
+        prev = _normalize_query(raw)
+        if not prev:
+            continue
+        prev_tokens = set(prev.split())
+        if not prev_tokens:
+            continue
+
+        if prev == current:
+            return True
+        if current_tokens == prev_tokens:
+            return True
+        if len(current_tokens) >= 2 and (current_tokens.issubset(prev_tokens) or prev_tokens.issubset(current_tokens)):
+            return True
+
+        if max(len(current_tokens), len(prev_tokens)) >= 4:
+            intersection = current_tokens & prev_tokens
+            union_size = len(current_tokens | prev_tokens)
+            if union_size and len(intersection) >= int(max(len(current_tokens), len(prev_tokens)) * 0.7):
+                return True
+
+    return False
+
+
+def _to_utc_datetime(value: str) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _log_writer_inputs(state: GraphState) -> None:
+    docs = state.get("documents", [])
+    logger.info(
+        "writer_agent input: query=%r doc_count=%s",
+        state.get("query"),
+        len(docs),
+    )
+    for idx, doc in enumerate(docs[:8], start=1):
+        if not isinstance(doc, dict):
+            continue
+        logger.info(
+            "writer_agent document[%s]: title=%s url=%s source=%s published=%s",
+            idx,
+            _serialize_for_log(doc.get("title", ""), 80),
+            _serialize_for_log(doc.get("url", ""), 120),
+            _serialize_for_log(doc.get("source", ""), 40),
+            _serialize_for_log(doc.get("published", ""), 40),
+        )
+        logger.debug(
+            "writer_agent document[%s] text=%s",
+            idx,
+            _serialize_for_log(doc.get("text", ""), 200),
+        )
+
+
 def _is_search_request(text: str) -> bool:
     return text.startswith(SEARCH_PREFIX)
 
@@ -131,12 +234,19 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
         "retry_queries": retry_queries[:6],
     }
 
-    response = await llm.ainvoke(
-        [
-            ("system", system_prompt),
-            ("user", json.dumps(prompt_payload, ensure_ascii=False)),
-        ]
-    )
+    try:
+        response = await _invoke_with_timeout(
+            llm,
+            [
+                ("system", system_prompt),
+                ("user", json.dumps(prompt_payload, ensure_ascii=False)),
+            ],
+            cfg.llm_timeout,
+        )
+    except asyncio.TimeoutError:
+        response = None
+    except Exception:
+        response = None
 
     try:
         plan = SearchPlan.model_validate(extract_json(response.content))
@@ -156,35 +266,104 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
     queries = [query] + retry_queries + plan.queries
     queries = dedupe_preserve(queries)
 
+    site_queries: list[str] = []
     for site in plan.must_include_sites:
         if site:
-            queries.append(f"{query} site:{site}")
+            site_queries.append(f"{query} site:{site}")
+    queries.extend(site_queries)
 
     queries = dedupe_preserve(queries)
     previous_query_set = {item.strip() for item in previous_queries if item.strip()}
-    fresh_queries = [item for item in queries if item.strip() and item.strip() not in previous_query_set]
+    retry_query_set = {item.strip() for item in retry_queries if item.strip()}
+    reused_from_previous = [item for item in queries if item.strip() in previous_query_set]
+    fresh_queries = []
+    for item in queries:
+        candidate = item.strip()
+        if not candidate:
+            continue
+        if _is_similar_query(candidate, previous_query_set):
+            reused_from_previous.append(candidate)
+            continue
+        fresh_queries.append(candidate)
     if not fresh_queries:
         fresh_queries = queries
+        if retry_query_set:
+            logger.warning(
+                "search_agent retry_queries_all_duplicated: no fresh query found, falling back to all queries",
+            )
+        logger.warning(
+            "search_agent no_fresh_queries_after_dedupe: fallback=%s",
+            _serialize_query_list(queries),
+        )
+
+    suppressed = [item for item in queries if item.strip() and item not in fresh_queries]
 
     logger.info(
-        "search_agent query plan ready: query_count=%s fresh_query_count=%s prior_query_count=%s",
+        "search_agent retry source: incoming_next_queries=%s",
+        _serialize_query_list(retry_queries),
+    )
+    logger.info(
+        "search_agent candidate queries (plan/site/retry): plan=%s, site=%s, retry=%s",
+        _serialize_query_list(plan.queries),
+        _serialize_query_list(site_queries),
+        _serialize_query_list(retry_queries),
+    )
+    logger.info(
+        "search_agent llm plan queries=%s",
+        _serialize_query_list(plan.queries),
+    )
+    logger.info(
+        "search_agent query overlap: reused_from_previous=%s",
+        _serialize_query_list(reused_from_previous),
+    )
+    logger.info(
+        "search_agent query suppressed=%s",
+        _serialize_query_list(suppressed),
+    )
+
+    logger.info(
+        "search_agent query plan ready: query_count=%s fresh_query_count=%s prior_query_count=%s used_queries=%s",
         len(queries),
         len(fresh_queries),
         len(previous_query_set),
+        _serialize_query_list(fresh_queries),
     )
 
     timeout = cfg.fetch_timeout
 
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
-        searx_tasks = [
-            searxng_search(client, cfg.searxng_base_url, q, cfg.searxng_engines, timeout)
+        searx_tasks = (
+            [
+                searxng_search(client, cfg.searxng_base_url, q, cfg.searxng_engines, timeout)
+                for q in fresh_queries
+            ]
+            if cfg.searxng_enabled
+            else []
+        )
+        naver_sort = "sim" if cfg.naver_search_sort not in {"sim", "date"} else cfg.naver_search_sort
+        naver_type = cfg.naver_search_type if cfg.naver_search_type in {"news", "webkr"} else "webkr"
+        naver_tasks = [
+            naver_search(
+                client,
+                q,
+                cfg.naver_client_id,
+                cfg.naver_client_secret,
+                naver_type,
+                naver_sort,
+                cfg.naver_search_display,
+                cfg.naver_search_start,
+                timeout,
+            )
             for q in fresh_queries
         ]
 
         searx_results_lists = await asyncio.gather(*searx_tasks) if searx_tasks else []
+        naver_results_lists = await asyncio.gather(*naver_tasks) if naver_tasks else []
 
     search_results: List[SearchResult] = []
     for batch in searx_results_lists:
+        search_results.extend(batch)
+    for batch in naver_results_lists:
         search_results.extend(batch)
 
     prior_seen_urls = {item.strip() for item in state.get("seen_urls", []) if item.strip()}
@@ -242,7 +421,7 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
     doc_count = len(documents)
     logger.info("verify_agent started: query=%r doc_count=%s", state.get("query"), doc_count)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     recent_cutoff = now - timedelta(days=cfg.max_age_days)
 
     recent_docs = 0
@@ -251,9 +430,8 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
         published = doc.get("published")
         if not published:
             continue
-        try:
-            dt = datetime.fromisoformat(published)
-        except ValueError:
+        dt = _to_utc_datetime(published)
+        if dt is None:
             continue
         docs_with_date += 1
         if dt >= recent_cutoff:
@@ -273,12 +451,17 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
         "documents_sample": documents[:6],
     }
 
-    response = await llm.ainvoke(
-        [
-            ("system", system_prompt),
-            ("user", json.dumps(summary, ensure_ascii=False)),
-        ]
-    )
+    try:
+        response = await _invoke_with_timeout(
+            llm,
+            [
+                ("system", system_prompt),
+                ("user", json.dumps(summary, ensure_ascii=False)),
+            ],
+            cfg.llm_timeout,
+        )
+    except Exception:
+        response = None
 
     try:
         verdict = VerifyResult.model_validate(extract_json(response.content))
@@ -308,6 +491,10 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
         docs_with_date,
         elapsed,
     )
+    logger.info(
+        "verify_agent recommended_queries=%s",
+        _serialize_query_list(verdict.next_queries),
+    )
 
     return {
         "is_sufficient": is_sufficient,
@@ -322,7 +509,15 @@ async def direct_chat_agent(state: GraphState, cfg: Config) -> GraphState:
     query = state.get("raw_query") or state["query"]
     logger.info("direct_chat_agent started: query=%r", query)
 
-    response = await llm.ainvoke([("user", query)])
+    try:
+        response = await _invoke_with_timeout(llm, [("user", query)], cfg.llm_timeout)
+    except Exception:
+        response = None
+    if response is None:
+        return {
+            "query": query,
+            "response": "요청 처리에 시간이 오래 걸려 응답을 만들지 못했습니다. 잠시 후 다시 시도해주세요.",
+        }
     content = response.content.strip()
 
     elapsed = perf_counter() - started_at
@@ -345,6 +540,7 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
     system_prompt = load_prompt("writer_agent_system.txt")
 
     docs = state.get("documents", [])
+    _log_writer_inputs(state)
     logger.info("writer_agent started: query=%r doc_count=%s", state.get("query"), len(docs))
     payload = {
         "original_query": state.get("raw_query") or state.get("query"),
@@ -354,12 +550,36 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
         "documents": docs,
     }
 
-    response = await llm.ainvoke(
-        [
-            ("system", system_prompt),
-            ("user", json.dumps(payload, ensure_ascii=False)),
+    try:
+        response = await _invoke_with_timeout(
+            llm,
+            [
+                ("system", system_prompt),
+                ("user", json.dumps(payload, ensure_ascii=False)),
+            ],
+            cfg.llm_timeout,
+        )
+    except asyncio.TimeoutError:
+        docs = state.get("documents", [])
+        headline = state.get("active_query") or state.get("query") or state.get("raw_query") or ""
+        lines = [
+            f"- {d.get('title', '(제목 없음)')} ({d.get('url', '-')})"
+            for d in docs[:8]
+            if isinstance(d, dict)
         ]
-    )
+        return {
+            "response": (
+                f"{headline}에 대한 요약을 생성하지 못했습니다.\n"
+                "요청 수집 자료 임시 목록입니다.\n" + ("\n".join(lines) if lines else "수집된 자료가 없습니다.")
+            )
+        }
+    except Exception:
+        response = None
+
+    if response is None:
+        return {
+            "response": "요약을 생성하지 못했습니다. 잠시 후 다시 시도해주세요.",
+        }
     elapsed = perf_counter() - started_at
     logger.info(
         "writer_agent finished: query=%r response_chars=%s elapsed=%.2fs",
