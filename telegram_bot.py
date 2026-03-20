@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
 
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Config
@@ -34,6 +36,7 @@ RESERVATION_HELP_PREFIX = "도움말"
 GMAIL_PREFIX = "메일 "
 CALENDAR_PREFIX = "일정 "
 ROUTER_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "command_router_system.txt"
+ROUTER_KEYWORD_BACKUP_PATH = Path(__file__).resolve().parent / "prompts" / "command_keyword_backup.json"
 
 RESERVATION_COMMAND_HINT = (
     "예약 기능 형식(표준):\n"
@@ -76,6 +79,7 @@ COMMAND_LIST_HINT = (
     "- `/start`: 시작 안내"
 )
 ROUTER_PROMPT_CACHE: dict[str, str] = {}
+ROUTER_BACKUP_CACHE: dict[str, Any] = {}
 
 
 def _router_prompt() -> str:
@@ -85,6 +89,21 @@ def _router_prompt() -> str:
     prompt = ROUTER_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
     ROUTER_PROMPT_CACHE["text"] = prompt
     return prompt
+
+
+def _router_backup_rules() -> dict[str, Any]:
+    cached = ROUTER_BACKUP_CACHE.get("rules")
+    if isinstance(cached, dict):
+        return cached
+    try:
+        raw = ROUTER_KEYWORD_BACKUP_PATH.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception:
+        parsed = {}
+    ROUTER_BACKUP_CACHE["rules"] = parsed
+    return parsed
 
 
 def _extract_json(text: str) -> dict:
@@ -132,7 +151,16 @@ SUPPORTED_JOB_TYPES = {
         "help": "채팅 검색/요약 실행",
     },
     "gmail": {
-        "aliases": {"메일", "gmail", "메일조회", "메일 조회"},
+        "aliases": {
+            "메일",
+            "gmail",
+            "메일조회",
+            "메일 조회",
+            "메일보내기",
+            "메일 보내기",
+            "메일전송",
+            "메일 전송",
+        },
         "label": "Gmail 조회",
         "help": "Gmail 조회 실행",
     },
@@ -185,9 +213,75 @@ def _chunk_text(text: str, max_len: int = MAX_TELEGRAM_MESSAGE_LEN) -> list[str]
         chunks.append("".join(current).rstrip())
     return chunks
 
+
+def _format_exception_reason(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        message = repr(exc)
+
+    parts: list[str] = [message]
+
+    response = getattr(exc, "resp", None)
+    status = getattr(response, "status", None)
+    reason = getattr(response, "reason", None)
+    if status or reason:
+        status_parts = []
+        if status is not None:
+            status_parts.append(f"HTTP {status}")
+        if reason:
+            status_parts.append(f"reason={reason}")
+        parts.append(" ".join(status_parts))
+
+    content = getattr(exc, "content", None)
+    if content:
+        try:
+            if isinstance(content, bytes):
+                payload = json.loads(content.decode("utf-8", errors="ignore"))
+            else:
+                payload = json.loads(str(content))
+            if isinstance(payload, dict):
+                error_obj = payload.get("error")
+                if isinstance(error_obj, dict):
+                    error_msg = error_obj.get("message")
+                    if error_msg:
+                        parts.append(f"api_message={error_msg}")
+                    error_list = error_obj.get("errors")
+                    if isinstance(error_list, list) and error_list:
+                        first = error_list[0]
+                        if isinstance(first, dict):
+                            code = first.get("reason", "")
+                            location = first.get("location", "")
+                            details = [str(code)] if code else []
+                            if location:
+                                details.append(f"location={location}")
+                            if details:
+                                parts.append("api_error_reason=" + ", ".join(details))
+        except Exception:
+            if isinstance(content, (bytes, bytearray)):
+                try:
+                    content_str = content.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    content_str = ""
+            else:
+                content_str = str(content).strip()
+            if content_str:
+                parts.append(f"api_content={content_str[:250]}")
+
+    detail = " | ".join(parts)
+    return detail[:800]
+
+
+async def _run_typing_indicator(context: ContextTypes.DEFAULT_TYPE, chat_id: int, interval_sec: int = 4) -> None:
+    while True:
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            return
+        await asyncio.sleep(interval_sec)
+
 def _is_allowed(cfg: Config, chat_id: int) -> bool:
     if not cfg.telegram_allowed_chat_ids:
-        return True
+        return cfg.telegram_open_access
     return chat_id in cfg.telegram_allowed_chat_ids
 
 
@@ -276,10 +370,8 @@ def _parse_job(tokens: list[str]) -> Optional[dict[str, Any]]:
             payload = " ".join(tokens[1:]).strip()
             if job_type == "gmail":
                 action = "search"
-                if payload.startswith("보내기") or payload.startswith("전송"):
-                    send = _parse_gmail_send_payload(payload)
-                    if send is None:
-                        return None
+                send = _parse_gmail_send_payload(payload)
+                if send is not None:
                     return {
                         "type": job_type,
                         "label": meta["label"],
@@ -331,7 +423,15 @@ def _parse_job(tokens: list[str]) -> Optional[dict[str, Any]]:
 
 def _parse_gmail_send_payload(text: str) -> Optional[dict[str, str]]:
     target = text.strip()
-    for prefix in ("보내기", "전송", "메일보내기", "메일 전송"):
+    for prefix in (
+        "보내기",
+        "전송",
+        "메일보내기",
+        "메일보내기:",
+        "메일 보냄",
+        "메일 전송",
+        "메일전송",
+    ):
         if target.startswith(prefix):
             target = target[len(prefix) :].strip()
             break
@@ -513,33 +613,6 @@ def _build_schedule_from_route(route: dict[str, Any], raw_text: str) -> Optional
 
 
 async def _route_user_input(text: str, cfg: Config) -> dict[str, Any]:
-    if text == RESERVATION_LIST_PREFIX:
-        return {"task": "schedule_list"}
-    if text.startswith(RESERVATION_CANCEL_PREFIX):
-        target = text[len(RESERVATION_CANCEL_PREFIX) :].strip()
-        if not target:
-            return {"task": "schedule_delete", "reservation_id": "", "error": "missing_reservation_id"}
-        if target.lower() in {"all", "전체", "전부"}:
-            target = "all"
-        return {"task": "schedule_delete", "reservation_id": target.strip().upper()}
-    if text == RESERVATION_HELP_PREFIX or text.startswith("/help"):
-        return {"task": "help"}
-    if text.startswith(GMAIL_PREFIX):
-        parsed = _parse_gmail_command(text)
-        if parsed is not None:
-            return parsed
-    if text.startswith(CALENDAR_PREFIX):
-        parsed = _parse_calendar_command(text)
-        if parsed is not None:
-            return parsed
-    if text.startswith(RESERVATION_PREFIX):
-        legacy = _parse_reservation(text)
-        if legacy is not None:
-            return {"task": "schedule", **legacy}
-        return {"task": "unknown", "message": text}
-    if text.startswith(SEARCH_PREFIX):
-        return {"task": "search", "query": text[len(SEARCH_PREFIX) :].strip() or text}
-
     try:
         llm = build_llm(cfg, temperature=0.0)
         prompt = _router_prompt()
@@ -549,11 +622,16 @@ async def _route_user_input(text: str, cfg: Config) -> dict[str, Any]:
         )
         content = response.content if hasattr(response, "content") else str(response)
         route = _extract_json(str(content))
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM 라우팅 실패, 키워드 백업 사용: error=%s", exc)
+        route = _route_user_input_by_backup(text)
+        if route:
+            return route
         return {"task": "chat", "query": text}
 
     if not isinstance(route, dict):
-        return {"task": "chat", "query": text}
+        backup = _route_user_input_by_backup(text)
+        return backup if backup else {"task": "chat", "query": text}
 
     task = str(route.get("task", "unknown")).strip()
     if task == "search":
@@ -613,6 +691,47 @@ async def _route_user_input(text: str, cfg: Config) -> dict[str, Any]:
         return {"task": "schedule", **legacy}
 
     return {"task": "chat", "query": text}
+
+
+def _route_user_input_by_backup(text: str) -> Optional[dict[str, Any]]:
+    rules = _router_backup_rules()
+    exact_rules = rules.get("exact", {}) if isinstance(rules, dict) else {}
+    prefix_rules = rules.get("prefix", {}) if isinstance(rules, dict) else {}
+
+    if isinstance(exact_rules, dict):
+        task = exact_rules.get(text)
+        if task == "schedule_list":
+            return {"task": "schedule_list"}
+        if task == "help":
+            return {"task": "help"}
+
+    if not isinstance(prefix_rules, dict):
+        return None
+
+    for prefix, task in prefix_rules.items():
+        if not isinstance(prefix, str) or not isinstance(task, str):
+            continue
+        if not text.startswith(prefix):
+            continue
+        if task == "schedule_delete":
+            target = text[len(prefix) :].strip()
+            if not target:
+                return {"task": "schedule_delete", "reservation_id": "", "error": "missing_reservation_id"}
+            if target.lower() in {"all", "전체", "전부"}:
+                target = "all"
+            return {"task": "schedule_delete", "reservation_id": target.strip().upper()}
+        if task == "schedule":
+            legacy = _parse_reservation(text)
+            return {"task": "schedule", **legacy} if legacy is not None else {"task": "unknown", "message": text}
+        if task == "gmail":
+            parsed = _parse_gmail_command(text)
+            return parsed if parsed is not None else {"task": "unknown", "message": text}
+        if task == "calendar":
+            parsed = _parse_calendar_command(text)
+            return parsed if parsed is not None else {"task": "unknown", "message": text}
+        if task == "search":
+            return {"task": "search", "query": text[len(prefix) :].strip() or text}
+    return None
 
 
 def _is_job_supported(job_type: str) -> bool:
@@ -718,7 +837,7 @@ async def _run_reservation_loop(
     context,
     cfg: Config,
     reservation_id: str,
-    graph_runner: Callable[[str], str],
+    graph_runner: Callable[[str], Awaitable[str]],
     job: dict,
     hour: int,
     minute: int,
@@ -758,10 +877,13 @@ async def _run_reservation_loop(
                 reservation["failure_count"] = reservation.get("failure_count", 0) + 1
                 reservation["last_status"] = "failed"
                 reservation["last_run_at"] = datetime.now().isoformat(timespec="seconds")
-                reservation["last_error"] = str(exc)
+                reservation["last_error"] = _format_exception_reason(exc)
                 await send_message(
                     chat_id=reservation["chat_id"],
-                    text=f"예약 실행 실패: {job.get('label', job.get('type'))}\n{exc}",
+                    text=(
+                        f"예약 실행 실패: {job.get('label', job.get('type'))}\n"
+                        f"실패 사유: {reservation['last_error']}"
+                    ),
                 )
 
             if mode == "once":
@@ -777,7 +899,7 @@ async def _run_reservation_loop(
 def _start_reservation_task(
     context,
     cfg: Config,
-    graph_runner: Callable[[str], str],
+    graph_runner: Callable[[str], Awaitable[str]],
     chat_id: int,
     reservation: dict,
 ) -> str:
@@ -796,8 +918,8 @@ def _start_reservation_task(
 
     task = context.application.create_task(
         _run_reservation_loop(
-            cfg,
             context,
+            cfg,
             reservation_id,
             graph_runner,
             job,
@@ -854,6 +976,10 @@ async def _execute_gmail_task(
         return format_gmail_messages(messages)
 
     if action == "send":
+        if not to:
+            raise ValueError("메일 전송 실패: 받는사람 주소가 비어 있습니다.")
+        if not subject:
+            raise ValueError("메일 전송 실패: 제목이 비어 있습니다.")
         result = await send_gmail_message(
             cfg,
             to=to,
@@ -979,7 +1105,7 @@ async def _send_command_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def _run_job(
     cfg: Config,
     context,
-    graph_runner: Callable[[str], str],
+    graph_runner: Callable[[str], Awaitable[str]],
     reservation: dict,
     job: dict,
 ) -> str:
@@ -1013,11 +1139,17 @@ async def _run_job(
     return await runner()
 
 
-def build_telegram_app(cfg: Config, graph_runner: Callable[[str], str]):
+def build_telegram_app(cfg: Config, graph_runner: Callable[[str], Awaitable[str]]):
+    if cfg.telegram_open_access:
+        logger.warning("TELEGRAM_OPEN_ACCESS=true 로 실행 중입니다. 모든 채팅 접근을 허용합니다.")
+    else:
+        logger.info("Telegram 허용 채팅 ID 개수: %s", len(cfg.telegram_allowed_chat_ids))
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_chat is None:
             return
         if not _is_allowed(cfg, update.effective_chat.id):
+            await update.message.reply_text("이 채팅은 봇 접근 허용 목록에 없습니다.")
             return
         await update.message.reply_text(
             "명령어를 분석해 검색/예약/Gmail/캘린더 동작을 자동 판별합니다.\n"
@@ -1031,158 +1163,171 @@ def build_telegram_app(cfg: Config, graph_runner: Callable[[str], str]):
         if update.effective_chat is None or update.message is None:
             return
         if not _is_allowed(cfg, update.effective_chat.id):
+            await update.message.reply_text("이 채팅은 봇 접근 허용 목록에 없습니다.")
             return
 
         text = (update.message.text or "").strip()
         if not text:
             return
 
-        route = await _route_user_input(text, cfg)
-
-        if route["task"] == "help":
-            await _send_command_list(update, context)
-            return
-        if route["task"] == "schedule_list":
-            await update.message.reply_text(_format_reservation_list(context, update.effective_chat.id))
-            return
-        if route["task"] == "schedule_delete":
-            reservation_id = route.get("reservation_id", "")
-            if not reservation_id:
-                await update.message.reply_text("예약 삭제 형식: `예약삭제 R001`", parse_mode="Markdown")
-                return
-            if reservation_id.lower() == "all":
-                canceled = _cancel_all_reservations(context, update.effective_chat.id)
-                if canceled:
-                    await update.message.reply_text(f"`예약` {canceled}건을 일괄 삭제했습니다.", parse_mode="Markdown")
-                else:
-                    await update.message.reply_text("삭제할 예약이 없습니다.")
-                return
-            if _cancel_reservation(context, update.effective_chat.id, reservation_id):
-                await update.message.reply_text(f"예약 `{reservation_id}`을(를) 삭제했습니다.", parse_mode="Markdown")
-            else:
-                await update.message.reply_text(f"예약 `{reservation_id}`을(를) 찾지 못했습니다.", parse_mode="Markdown")
-            return
-        if route["task"] == "gmail":
-            try:
-                gmail_query = route.get("query", "in:inbox is:unread")
-                action = route.get("action", "search")
-                max_results = int(route.get("max_results", 5))
-                if action == "send":
-                    to = str(route.get("to", "")).strip()
-                    subject = str(route.get("subject", "")).strip()
-                    body = str(route.get("body", "")).strip()
-                    if not to or not subject:
-                        await update.message.reply_text(
-                            "메일 보내기 형식이 맞지 않습니다.\n"
-                            "예: `메일 보내기 a@example.com | 제목 | 내용`\n"
-                            "`메일 보내기` 뒤에는 받는사람, 제목, 내용이 `|`로 구분되어야 합니다.",
-                            parse_mode="Markdown",
-                        )
-                        return
-                    response = await _execute_gmail_task(
-                        cfg,
-                        payload="",
-                        action=action,
-                        query=gmail_query,
-                        max_results=max_results,
-                        to=to,
-                        subject=subject,
-                        body=body,
-                    )
-                else:
-                    response = await _execute_gmail_task(
-                        cfg,
-                        payload=gmail_query,
-                        action=action,
-                        query=gmail_query,
-                        max_results=max_results,
-                    )
-                for chunk in _chunk_text(response):
-                    await update.message.reply_text(chunk)
-            except Exception as exc:
-                await update.message.reply_text(f"Gmail 작업 중 오류가 발생했습니다: {exc}")
-            return
-        if route["task"] == "calendar":
-            try:
-                action = route.get("action", "list")
-                if action == "create":
-                    title = str(route.get("title", "")).strip()
-                    start = str(route.get("start", "")).strip()
-                    end = str(route.get("end", "")).strip()
-                    description = str(route.get("description", "")).strip()
-                    if not (title and start and end):
-                        await update.message.reply_text(
-                            "캘린더 생성 형식이 올바르지 않습니다.\n예: `일정 생성 회의 | 2026-03-20 10:00 | 2026-03-20 11:00 | 회의 내용`",
-                            parse_mode="Markdown",
-                        )
-                        return
-                    payload = f"{title} | {start} | {end} | {description}".rstrip(" |")
-                    response = await _execute_calendar_task(
-                        cfg=cfg,
-                        payload=payload,
-                        action="create",
-                    )
-                else:
-                    payload = ""
-                    if route.get("query"):
-                        payload = str(route.get("query"))
-                    response = await _execute_calendar_task(
-                        cfg=cfg,
-                        payload=payload,
-                        action="list",
-                        query=payload if payload else None,
-                        time_min=route.get("time_min"),
-                        time_max=route.get("time_max"),
-                        max_results=int(route.get("max_results", 10)),
-                    )
-                for chunk in _chunk_text(response):
-                    await update.message.reply_text(chunk)
-            except Exception as exc:
-                await update.message.reply_text(f"캘린더 작업 중 오류가 발생했습니다: {exc}")
-            return
-        if route["task"] == "schedule":
-            reservation = {
-                "hour": route["hour"],
-                "minute": route["minute"],
-                "job": route["job"],
-                "mode": route["mode"],
-                "weekdays": route["weekdays"],
-                "raw_input": route.get("raw_input", text),
-            }
-            reservation_id = _start_reservation_task(
-                context,
-                cfg,
-                graph_runner,
-                update.effective_chat.id,
-                reservation,
-            )
-            await update.message.reply_text(
-                f"`{reservation_id}` 생성됨\n"
-                f"`{_format_mode_label(reservation['mode'])}` `{reservation['hour']:02d}:{reservation['minute']:02d}` "
-                f"`{reservation['job']['label']}` `{reservation['job']['payload']}` 예약이 등록되었습니다.",
-                parse_mode="Markdown",
-            )
-            return
-
-        query = route.get("query", text)
-        if route["task"] == "search" and not query.startswith(SEARCH_PREFIX):
-            query = f"{SEARCH_PREFIX}{query}"
-        if route["task"] == "search":
-            waiting_message = "검색 중... 잠시만 기다려주세요."
-        elif route["task"] in {"gmail", "calendar"}:
-            waiting_message = "요청을 처리 중입니다. 잠시만 기다려주세요."
-        else:
-            waiting_message = "생각 중... 잠시만 기다려주세요."
-        await update.message.reply_text(waiting_message)
-
+        typing_task = context.application.create_task(
+            _run_typing_indicator(context, update.effective_chat.id)
+        )
         try:
-            response = await graph_runner(query)
-        except Exception as exc:
-            logger.exception("Graph execution failed")
-            await update.message.reply_text(f"처리 중 오류가 발생했습니다: {exc}")
-            return
-        for chunk in _chunk_text(response):
-            await update.message.reply_text(chunk)
+            route = await _route_user_input(text, cfg)
+
+            if route["task"] == "help":
+                await _send_command_list(update, context)
+                return
+            if route["task"] == "schedule_list":
+                await update.message.reply_text(_format_reservation_list(context, update.effective_chat.id))
+                return
+            if route["task"] == "schedule_delete":
+                reservation_id = route.get("reservation_id", "")
+                if not reservation_id:
+                    await update.message.reply_text("예약 삭제 형식: `예약삭제 R001`", parse_mode="Markdown")
+                    return
+                if reservation_id.lower() == "all":
+                    canceled = _cancel_all_reservations(context, update.effective_chat.id)
+                    if canceled:
+                        await update.message.reply_text(f"`예약` {canceled}건을 일괄 삭제했습니다.", parse_mode="Markdown")
+                    else:
+                        await update.message.reply_text("삭제할 예약이 없습니다.")
+                    return
+                if _cancel_reservation(context, update.effective_chat.id, reservation_id):
+                    await update.message.reply_text(f"예약 `{reservation_id}`을(를) 삭제했습니다.", parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(f"예약 `{reservation_id}`을(를) 찾지 못했습니다.", parse_mode="Markdown")
+                return
+            if route["task"] == "gmail":
+                try:
+                    gmail_query = route.get("query", "in:inbox is:unread")
+                    action = route.get("action", "search")
+                    max_results = int(route.get("max_results", 5))
+                    if action == "send":
+                        to = str(route.get("to", "")).strip()
+                        subject = str(route.get("subject", "")).strip()
+                        body = str(route.get("body", "")).strip()
+                        if not to or not subject:
+                            await update.message.reply_text(
+                                "메일 보내기 형식이 맞지 않습니다.\n"
+                                "예: `메일 보내기 a@example.com | 제목 | 내용`\n"
+                                "`메일 보내기` 뒤에는 받는사람, 제목, 내용이 `|`로 구분되어야 합니다.",
+                                parse_mode="Markdown",
+                            )
+                            return
+                        response = await _execute_gmail_task(
+                            cfg,
+                            payload="",
+                            action=action,
+                            query=gmail_query,
+                            max_results=max_results,
+                            to=to,
+                            subject=subject,
+                            body=body,
+                        )
+                    else:
+                        response = await _execute_gmail_task(
+                            cfg,
+                            payload=gmail_query,
+                            action=action,
+                            query=gmail_query,
+                            max_results=max_results,
+                        )
+                    for chunk in _chunk_text(response):
+                        await update.message.reply_text(chunk)
+                except Exception as exc:
+                    reason = _format_exception_reason(exc)
+                    if action == "send":
+                        await update.message.reply_text(f"메일 전송 실패: {reason}")
+                    else:
+                        await update.message.reply_text(f"Gmail 작업 중 오류가 발생했습니다: {reason}")
+                return
+            if route["task"] == "calendar":
+                try:
+                    action = route.get("action", "list")
+                    if action == "create":
+                        title = str(route.get("title", "")).strip()
+                        start = str(route.get("start", "")).strip()
+                        end = str(route.get("end", "")).strip()
+                        description = str(route.get("description", "")).strip()
+                        if not (title and start and end):
+                            await update.message.reply_text(
+                                "캘린더 생성 형식이 올바르지 않습니다.\n예: `일정 생성 회의 | 2026-03-20 10:00 | 2026-03-20 11:00 | 회의 내용`",
+                                parse_mode="Markdown",
+                            )
+                            return
+                        payload = f"{title} | {start} | {end} | {description}".rstrip(" |")
+                        response = await _execute_calendar_task(
+                            cfg=cfg,
+                            payload=payload,
+                            action="create",
+                        )
+                    else:
+                        payload = ""
+                        if route.get("query"):
+                            payload = str(route.get("query"))
+                        response = await _execute_calendar_task(
+                            cfg=cfg,
+                            payload=payload,
+                            action="list",
+                            query=payload if payload else None,
+                            time_min=route.get("time_min"),
+                            time_max=route.get("time_max"),
+                            max_results=int(route.get("max_results", 10)),
+                        )
+                    for chunk in _chunk_text(response):
+                        await update.message.reply_text(chunk)
+                except Exception as exc:
+                    await update.message.reply_text(f"캘린더 작업 중 오류가 발생했습니다: {exc}")
+                return
+            if route["task"] == "schedule":
+                reservation = {
+                    "hour": route["hour"],
+                    "minute": route["minute"],
+                    "job": route["job"],
+                    "mode": route["mode"],
+                    "weekdays": route["weekdays"],
+                    "raw_input": route.get("raw_input", text),
+                }
+                reservation_id = _start_reservation_task(
+                    context,
+                    cfg,
+                    graph_runner,
+                    update.effective_chat.id,
+                    reservation,
+                )
+                await update.message.reply_text(
+                    f"`{reservation_id}` 생성됨\n"
+                    f"`{_format_mode_label(reservation['mode'])}` `{reservation['hour']:02d}:{reservation['minute']:02d}` "
+                    f"`{reservation['job']['label']}` `{reservation['job']['payload']}` 예약이 등록되었습니다.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            query = route.get("query", text)
+            if route["task"] == "search" and not query.startswith(SEARCH_PREFIX):
+                query = f"{SEARCH_PREFIX}{query}"
+            if route["task"] == "search":
+                waiting_message = "검색 중입니다..."
+            elif route["task"] in {"gmail", "calendar"}:
+                waiting_message = "요청을 처리 중입니다..."
+            else:
+                waiting_message = "생각 중입니다..."
+            await update.message.reply_text(waiting_message)
+
+            try:
+                response = await graph_runner(query)
+            except Exception as exc:
+                logger.exception("Graph execution failed")
+                await update.message.reply_text(f"처리 중 오류가 발생했습니다: {exc}")
+                return
+            for chunk in _chunk_text(response):
+                await update.message.reply_text(chunk)
+        finally:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task
 
     app = ApplicationBuilder().token(cfg.telegram_bot_token).build()
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

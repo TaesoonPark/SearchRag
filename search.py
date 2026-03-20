@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
 from datetime import datetime
 from typing import Any, Iterable, Optional
@@ -12,6 +13,8 @@ from dateutil import parser as date_parser
 from fetch import USER_AGENT, fetch_and_extract
 from models import Document, SearchResult
 from normalize import dedupe_preserve
+
+logger = logging.getLogger(__name__)
 
 
 def parse_datetime(value: Any) -> Optional[datetime]:
@@ -89,7 +92,8 @@ async def searxng_search(
         resp = await client.get(f"{base_url.rstrip('/')}/search", params=params, timeout=timeout)
         resp.raise_for_status()
         payload = resp.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning("SearXNG 검색 실패: query=%r error=%s", query, exc)
         return []
 
     results = payload.get("results", []) if isinstance(payload, dict) else []
@@ -135,7 +139,8 @@ async def naver_search(
         )
         resp.raise_for_status()
         payload = resp.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Naver 검색 실패: query=%r type=%s error=%s", query, search_type, exc)
         return []
 
     items = payload.get("items", []) if isinstance(payload, dict) else []
@@ -159,9 +164,9 @@ async def collect_documents(
 
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _fetch(url: str) -> Optional[Document]:
-        async with semaphore:
-            async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+        async def _fetch(url: str) -> Optional[Document]:
+            async with semaphore:
                 data = await fetch_and_extract(client, url, timeout, max_chars)
                 if not data:
                     return None
@@ -174,6 +179,6 @@ async def collect_documents(
                     published=(result.published if result else None),
                 )
 
-    tasks = [_fetch(url) for url in urls]
-    docs_raw = await asyncio.gather(*tasks)
+        tasks = [_fetch(url) for url in urls]
+        docs_raw = await asyncio.gather(*tasks)
     return [doc for doc in docs_raw if doc]

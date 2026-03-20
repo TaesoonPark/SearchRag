@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import httpx
@@ -7,6 +8,8 @@ import re
 from bs4 import BeautifulSoup
 
 from normalize import collapse_whitespace, trim_text
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
 MAIN_CONTENT_SELECTORS = (
@@ -66,7 +69,8 @@ async def fetch_html(client: httpx.AsyncClient, url: str, timeout: int) -> Optio
         if "text/html" not in resp.headers.get("content-type", ""):
             return None
         return resp.text
-    except Exception:
+    except Exception as exc:
+        logger.debug("문서 fetch 실패: url=%s error=%s", url, exc)
         return None
 
 

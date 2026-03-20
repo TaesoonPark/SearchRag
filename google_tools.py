@@ -259,10 +259,13 @@ def format_gmail_messages(messages: list[dict[str, Any]]) -> str:
 def format_gmail_send_result(result: dict[str, Any], *, to: str, subject: str) -> str:
     message_id = result.get("id", "")
     thread_id = result.get("threadId", "")
+    labels = result.get("labelIds") or []
     trace_id = result.get("x_trace_message_id", "")
-    lines = ["메일이 발송되었습니다."]
+    lines = ["메일 전송 성공"]
     lines.append(f"수신: {to}")
     lines.append(f"제목: {subject}")
+    if labels:
+        lines.append(f"상태: {', '.join(labels)}")
     if trace_id:
         lines.append(f"추적ID: {trace_id}")
     if message_id:

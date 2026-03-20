@@ -46,6 +46,7 @@ class Config:
 
     telegram_bot_token: str
     telegram_allowed_chat_ids: List[int]
+    telegram_open_access: bool
     run_background: bool
 
     max_search_attempts: int
@@ -124,6 +125,7 @@ def load_config() -> Config:
         google_calendar_id=_get("GOOGLE_CALENDAR_ID", "primary"),
         telegram_bot_token=_get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_ids=_get_int_list("TELEGRAM_ALLOWED_CHAT_IDS"),
+        telegram_open_access=_get_bool("TELEGRAM_OPEN_ACCESS", False),
         run_background=_get_bool("RUN_IN_BACKGROUND", False),
         max_search_attempts=_get_int("MAX_SEARCH_ATTEMPTS", 2),
         min_docs=_get_int("MIN_DOCS", 6),

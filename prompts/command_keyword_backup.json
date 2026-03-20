@@ -1,0 +1,14 @@
+{
+  "exact": {
+    "예약목록": "schedule_list",
+    "도움말": "help"
+  },
+  "prefix": {
+    "예약삭제 ": "schedule_delete",
+    "예약 ": "schedule",
+    "검색 ": "search",
+    "메일 ": "gmail",
+    "일정 ": "calendar"
+  },
+  "notes": "LLM 라우터 실패 시 최소 동작 보장을 위한 키워드 백업 규칙"
+}

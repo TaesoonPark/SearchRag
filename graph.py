@@ -244,13 +244,17 @@ async def search_agent(state: GraphState, cfg: Config) -> GraphState:
             cfg.llm_timeout,
         )
     except asyncio.TimeoutError:
+        logger.warning("search_agent LLM timeout: query=%r timeout=%s", query, cfg.llm_timeout)
         response = None
-    except Exception:
+    except Exception as exc:
+        logger.warning("search_agent LLM 호출 실패: query=%r error=%s", query, exc)
         response = None
 
     try:
-        plan = SearchPlan.model_validate(extract_json(response.content))
-    except Exception:
+        content = response.content if response is not None else ""
+        plan = SearchPlan.model_validate(extract_json(content))
+    except Exception as exc:
+        logger.warning("search_agent 계획 파싱 실패: query=%r error=%s", query, exc)
         plan = SearchPlan(
             queries=[],
             time_range_days=cfg.max_age_days,
@@ -460,12 +464,15 @@ async def verify_agent(state: GraphState, cfg: Config) -> GraphState:
             ],
             cfg.llm_timeout,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("verify_agent LLM 호출 실패: query=%r error=%s", state.get("query"), exc)
         response = None
 
     try:
-        verdict = VerifyResult.model_validate(extract_json(response.content))
-    except Exception:
+        content = response.content if response is not None else ""
+        verdict = VerifyResult.model_validate(extract_json(content))
+    except Exception as exc:
+        logger.warning("verify_agent 검증 파싱 실패: query=%r error=%s", state.get("query"), exc)
         verdict = VerifyResult(
             is_sufficient=doc_count >= cfg.min_docs,
             gaps=["검증 JSON 파싱 실패"],
@@ -511,7 +518,8 @@ async def direct_chat_agent(state: GraphState, cfg: Config) -> GraphState:
 
     try:
         response = await _invoke_with_timeout(llm, [("user", query)], cfg.llm_timeout)
-    except Exception:
+    except Exception as exc:
+        logger.warning("direct_chat_agent LLM 호출 실패: query=%r error=%s", query, exc)
         response = None
     if response is None:
         return {
@@ -560,6 +568,7 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
             cfg.llm_timeout,
         )
     except asyncio.TimeoutError:
+        logger.warning("writer_agent LLM timeout: query=%r timeout=%s", state.get("query"), cfg.llm_timeout)
         docs = state.get("documents", [])
         headline = state.get("active_query") or state.get("query") or state.get("raw_query") or ""
         lines = [
@@ -573,7 +582,8 @@ async def writer_agent(state: GraphState, cfg: Config) -> GraphState:
                 "요청 수집 자료 임시 목록입니다.\n" + ("\n".join(lines) if lines else "수집된 자료가 없습니다.")
             )
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("writer_agent LLM 호출 실패: query=%r error=%s", state.get("query"), exc)
         response = None
 
     if response is None:

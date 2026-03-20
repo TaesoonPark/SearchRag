@@ -32,6 +32,10 @@ def main() -> None:
 
     if not cfg.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
+    if not cfg.telegram_allowed_chat_ids and not cfg.telegram_open_access:
+        raise RuntimeError(
+            "보안상 TELEGRAM_ALLOWED_CHAT_IDS 또는 TELEGRAM_OPEN_ACCESS=true 설정이 필요합니다."
+        )
 
     graph = build_graph(cfg)
 
