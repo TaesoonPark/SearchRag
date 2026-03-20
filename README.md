@@ -17,9 +17,10 @@ pip install -r requirements.txt
 
 ## 설정
 ```bash
-cp .env.example .env
+mkdir -p configuration
+cp configuration/.env.example configuration/.env
 ```
-`.env`에 아래 값을 채우세요.
+`configuration/.env`에 아래 값을 채우세요.
 - `LLM_BASE_URL` (vLLM OpenAI-compatible 서버 URL)
 - `LLM_MODEL` (예: gpt-oss-120b)
 - `LLM_TIMEOUT`

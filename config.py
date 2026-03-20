@@ -8,10 +8,13 @@ from typing import List
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+CONFIG_DIR = PROJECT_ROOT / "configuration"
+DEFAULT_ENV_PATH = CONFIG_DIR / ".env"
+ALTERNATE_ENV_PATH = PROJECT_ROOT / ".env"
 
 
 def _load_env() -> None:
-    env_path = PROJECT_ROOT / ".env"
+    env_path = DEFAULT_ENV_PATH if DEFAULT_ENV_PATH.exists() else ALTERNATE_ENV_PATH
     if env_path.exists():
         load_dotenv(env_path)
     else:
@@ -35,6 +38,11 @@ class Config:
     naver_search_sort: str
     naver_search_display: int
     naver_search_start: int
+    google_service_account_path: str
+    google_user_email: str
+    google_oauth_client_path: str
+    google_oauth_token_path: str
+    google_calendar_id: str
 
     telegram_bot_token: str
     telegram_allowed_chat_ids: List[int]
@@ -109,6 +117,11 @@ def load_config() -> Config:
         naver_search_sort=_get("NAVER_SEARCH_SORT", "date").lower().strip() or "date",
         naver_search_display=max(1, min(_get_int("NAVER_SEARCH_DISPLAY", 10), 100)),
         naver_search_start=max(1, _get_int("NAVER_SEARCH_START", 1)),
+        google_service_account_path=_get("GOOGLE_SERVICE_ACCOUNT_PATH", ""),
+        google_user_email=_get("GOOGLE_USER_EMAIL", ""),
+        google_oauth_client_path=_get("GOOGLE_OAUTH_CLIENT_PATH", ""),
+        google_oauth_token_path=_get("GOOGLE_OAUTH_TOKEN_PATH", ""),
+        google_calendar_id=_get("GOOGLE_CALENDAR_ID", "primary"),
         telegram_bot_token=_get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_ids=_get_int_list("TELEGRAM_ALLOWED_CHAT_IDS"),
         run_background=_get_bool("RUN_IN_BACKGROUND", False),
