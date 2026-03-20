@@ -182,6 +182,7 @@ cython_debug/
 # Learn more at https://abstra.io/docs
 .abstra/
 configuration/
+!configuration/.env.example
 
 # Visual Studio Code
 #  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
