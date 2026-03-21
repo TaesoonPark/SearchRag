@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from config import load_config
+from app.config import load_config
 
 
 class ConfigLoadTest(unittest.TestCase):

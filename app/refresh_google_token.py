@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from config import load_config
+from app.config import load_config
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 
@@ -27,7 +27,7 @@ def _build_scopes() -> list[str]:
 
 def _guess_client_secret_path(base_dir: Path) -> list[Path]:
     candidates = []
-    for item in (base_dir / "configuration").glob("*.json"):
+    for item in base_dir.glob("*.json"):
         if "token" in item.name.lower():
             continue
         candidates.append(item)
@@ -54,11 +54,11 @@ def main() -> None:
     parser.add_argument(
         "--client-path",
         default=cfg.google_oauth_client_path or "",
-        help="OAuth client_secret JSON 경로 (예: configuration/client_secret.json)",
+        help="OAuth client_secret JSON 경로 (예: client_secret.json)",
     )
     parser.add_argument(
         "--token-path",
-        default=cfg.google_oauth_token_path or "configuration/token.json",
+        default=cfg.google_oauth_token_path or "token.json",
         help="재생성할 토큰 저장 경로",
     )
     parser.add_argument(
@@ -79,7 +79,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    client_candidates = _guess_client_secret_path(base_dir=Path(__file__).resolve().parent)
+    project_root = Path(__file__).resolve().parent.parent
+    client_candidates = _guess_client_secret_path(base_dir=project_root)
     if not args.client_path:
         if len(client_candidates) == 1:
             args.client_path = str(client_candidates[0])
@@ -89,16 +90,16 @@ def main() -> None:
                 "GOOGLE_OAUTH_CLIENT_PATH가 설정되어 있지 않고, candidate OAuth client 파일이 1개가 아닙니다.\n"
                 "다음 중 하나를 선택해 --client-path로 지정하세요.\n"
                 f"{listed}\n\n"
-                "예: python refresh_google_token.py --client-path configuration/<your_client_secret>.json"
+                "예: python -m app.refresh_google_token --client-path <your_client_secret>.json"
             )
         else:
             raise SystemExit(
                 "GOOGLE_OAUTH_CLIENT_PATH가 설정되어 있지 않습니다. "
-                "configuration/client_secret.json 위치를 확인 후 configuration/.env에 GOOGLE_OAUTH_CLIENT_PATH를 입력하거나 "
+                "루트의 client_secret.json 위치를 확인 후 .env에 GOOGLE_OAUTH_CLIENT_PATH를 입력하거나 "
                 "--client-path로 직접 지정하세요."
             )
 
-    base_dir = Path(__file__).resolve().parent
+    base_dir = project_root
     client_path = _resolve_path(base_dir, args.client_path)
     token_path = _resolve_path(base_dir, args.token_path)
 

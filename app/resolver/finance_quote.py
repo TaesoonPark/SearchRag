@@ -7,7 +7,7 @@ from typing import Optional
 
 import httpx
 
-from models import Document, SearchResult
+from app.models import Document, SearchResult
 
 PRICE_QUERY_KEYWORDS = (
     "주가",

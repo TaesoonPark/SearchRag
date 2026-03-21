@@ -7,9 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import Config, load_config
-from graph import build_graph
-from telegram_bot import build_telegram_app
+from app.config import Config, load_config
+from app.graph import build_graph
+from app.telegram_bot import build_telegram_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOG_PATH = PROJECT_ROOT / "bot_log"

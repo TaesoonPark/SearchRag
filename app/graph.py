@@ -13,11 +13,11 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
-from config import Config
-from llm import build_llm
-from models import Document, SearchResult
-from normalize import dedupe_preserve, trim_text
-from search import collect_documents, naver_search, searxng_search
+from app.config import Config
+from app.llm import build_llm
+from app.models import Document, SearchResult
+from app.normalize import dedupe_preserve, trim_text
+from app.search import collect_documents, naver_search, searxng_search
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 logger = logging.getLogger(__name__)

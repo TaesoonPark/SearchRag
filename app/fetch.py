@@ -7,7 +7,7 @@ import httpx
 import re
 from bs4 import BeautifulSoup
 
-from normalize import collapse_whitespace, trim_text
+from app.normalize import collapse_whitespace, trim_text
 
 logger = logging.getLogger(__name__)
 

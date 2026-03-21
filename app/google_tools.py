@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from typing import Any, List, Optional
 
-from config import Config
+from app.config import Config
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",

@@ -18,10 +18,9 @@ pip install -r requirements.txt
 
 ## 설정
 ```bash
-mkdir -p configuration
-cp configuration/.env.example configuration/.env
+cp .env.example .env
 ```
-`configuration/.env`에 아래 값을 채우세요.
+루트의 `.env`에 아래 값을 채우세요.
 
 - 공통
   - `LLM_BASE_URL`: OpenAI 호환 엔드포인트(vLLM/호스팅 API)
@@ -44,8 +43,8 @@ cp configuration/.env.example configuration/.env
 - Gmail / Calendar
   - `GOOGLE_SERVICE_ACCOUNT_PATH` (서비스 계정 사용 시)
   - `GOOGLE_USER_EMAIL` (서비스 계정 위임 시 선택)
-  - `GOOGLE_OAUTH_CLIENT_PATH` (`configuration/client_secret.json` 추천)
-  - `GOOGLE_OAUTH_TOKEN_PATH` (`configuration/token.json`)
+  - `GOOGLE_OAUTH_CLIENT_PATH` (`client_secret.json` 추천)
+  - `GOOGLE_OAUTH_TOKEN_PATH` (`token.json`)
   - `GOOGLE_CALENDAR_ID` (기본 `primary`)
 
 > OAuth 방식은 `GOOGLE_OAUTH_CLIENT_PATH`와 `GOOGLE_OAUTH_TOKEN_PATH`로 동작합니다.
@@ -54,7 +53,7 @@ cp configuration/.env.example configuration/.env
 
 Google OAuth 토큰이 없거나 오래되었다면 다음으로 갱신하세요.
 ```bash
-venv/bin/python refresh_google_token.py --client-path configuration/client_secret.json --port 8080 --console
+venv/bin/python -m app.refresh_google_token --client-path client_secret.json --port 8080 --console
 ```
 
 `--console`은 브라우저 자동 실행 없이 로컬 콜백 방식으로 인증합니다. (web 타입일 때는 리다이렉트 URI를 사전 등록)
@@ -78,14 +77,13 @@ pip install -r requirements.txt
 ```
 - 3) 환경 파일 생성
 ```bash
-mkdir -p configuration
-cp configuration/.env.example configuration/.env
-cp configuration/client_secret.json 샘플이 있을 경우 configuration/client_secret.json
+cp .env.example .env
+cp client_secret.json.sample client_secret.json  # 샘플이 있을 때
 ```
-`configuration/.env`에서 `TELEGRAM_BOT_TOKEN` 등 필수 값만 우선 입력하고 나머지는 기본값으로 시작해도 됩니다.
+`.env`에서 `TELEGRAM_BOT_TOKEN` 등 필수 값만 우선 입력하고 나머지는 기본값으로 시작해도 됩니다.
 - 4) OAuth 토큰 준비(구글 연동 사용 시)
 ```bash
-venv/bin/python refresh_google_token.py --client-path configuration/client_secret.json --port 8080 --console
+venv/bin/python -m app.refresh_google_token --client-path client_secret.json --port 8080 --console
 ```
 - 5) 실행
 ```bash
@@ -105,6 +103,6 @@ python main.py
 - 도움말: `/help`, `/start`
 
 ## 참고
-- `configuration/.env.example`을 기준으로 `configuration/.env`를 만들면 처음 사용자도 바로 시작 가능합니다.
+- `.env.example`을 기준으로 루트 `.env`를 만들면 처음 사용자도 바로 시작 가능합니다.
 - 배포 환경에서는 `RUN_IN_BACKGROUND=true`를 켜거나, 시스템 서비스로 관리하세요.
-- 명령 키워드 백업 규칙은 `prompts/command_keyword_backup.json`에 저장되며, 라우터 LLM 실패 시에만 사용됩니다.
+- 명령 키워드 백업 규칙은 `app/prompts/command_keyword_backup.json`에 저장되며, 라우터 LLM 실패 시에만 사용됩니다.

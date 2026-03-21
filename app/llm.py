@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain_openai import ChatOpenAI
 
-from config import Config
+from app.config import Config
 
 
 def build_llm(cfg: Config, temperature: float = 0.2) -> ChatOpenAI:

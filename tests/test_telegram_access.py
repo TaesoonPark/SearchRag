@@ -1,7 +1,7 @@
 import unittest
 
-from config import Config
-from telegram_bot import _is_allowed
+from app.config import Config
+from app.telegram_bot import _is_allowed
 
 
 def _base_config() -> Config:

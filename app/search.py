@@ -10,9 +10,9 @@ from typing import Any, Iterable, Optional
 import httpx
 from dateutil import parser as date_parser
 
-from fetch import USER_AGENT, fetch_and_extract
-from models import Document, SearchResult
-from normalize import dedupe_preserve
+from app.fetch import USER_AGENT, fetch_and_extract
+from app.models import Document, SearchResult
+from app.normalize import dedupe_preserve
 
 logger = logging.getLogger(__name__)
 

@@ -13,9 +13,9 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
-from config import Config
-from llm import build_llm
-from google_tools import (
+from app.config import Config
+from app.llm import build_llm
+from app.google_tools import (
     create_google_event,
     format_calendar_events,
     format_gmail_send_result,

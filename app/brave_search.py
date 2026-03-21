@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import httpx
 
-from fetch import USER_AGENT
-from models import SearchResult
-from search import parse_datetime
+from app.fetch import USER_AGENT
+from app.models import SearchResult
+from app.search import parse_datetime
 
 
 def _brave_result_to_search_result(item: dict) -> SearchResult:

@@ -7,16 +7,14 @@ from typing import List
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-CONFIG_DIR = PROJECT_ROOT / "configuration"
-DEFAULT_ENV_PATH = CONFIG_DIR / ".env"
-ALTERNATE_ENV_PATH = PROJECT_ROOT / ".env"
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parent
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 
 
 def _load_env() -> None:
-    env_path = DEFAULT_ENV_PATH if DEFAULT_ENV_PATH.exists() else ALTERNATE_ENV_PATH
-    if env_path.exists():
-        load_dotenv(env_path)
+    if DEFAULT_ENV_PATH.exists():
+        load_dotenv(DEFAULT_ENV_PATH)
     else:
         # Still allow environment variables to be provided externally
         load_dotenv()

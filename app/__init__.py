@@ -1,0 +1,1 @@
+"""SearchRag application package."""
